@@ -29,6 +29,9 @@ class FakeRedis:
     def ttl(self, key):
         return settings.rate_limit_window_seconds
 
+    def lpush(self, key, value):
+        self.values.setdefault(key, []).insert(0, value)
+
 
 class DownRedis:
     def get(self, key):
@@ -38,6 +41,9 @@ class DownRedis:
         raise redis.ConnectionError("Redis is down")
 
     def incr(self, key):
+        raise redis.ConnectionError("Redis is down")
+
+    def lpush(self, key, value):
         raise redis.ConnectionError("Redis is down")
 
 

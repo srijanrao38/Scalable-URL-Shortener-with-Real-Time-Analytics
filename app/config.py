@@ -17,6 +17,9 @@ class Settings:
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
     rate_limit_window_seconds: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
     trusted_proxy_ips: str = os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1")
+    ip_hash_salt: str = os.getenv("IP_HASH_SALT", "change-me-in-production")
+    click_queue_name: str = os.getenv("CLICK_QUEUE_NAME", "click_events")
+    failed_click_queue_name: str = os.getenv("FAILED_CLICK_QUEUE_NAME", "click_events_failed")
 
 
 settings = Settings()

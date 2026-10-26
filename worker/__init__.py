@@ -1,0 +1,1 @@
+"""Background click-event worker."""

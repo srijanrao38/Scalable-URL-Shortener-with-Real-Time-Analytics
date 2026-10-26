@@ -2,9 +2,12 @@
 
 import secrets
 import string
+import hashlib
+import json
+from datetime import datetime, timezone
 
 import redis
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +60,30 @@ def enforce_rate_limit(request: Request) -> None:
         return
 
 
+def hash_ip(ip_address: str) -> str:
+    """Create a non-reversible, salt-protected identifier for analytics."""
+
+    value = f"{settings.ip_hash_salt}:{ip_address}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()
+
+
+def enqueue_click_event(code: str, clicked_at: str, user_agent: str, ip_address: str) -> None:
+    """Push analytics work after the response; failure must not affect redirects."""
+
+    event = {
+        "code": code,
+        "timestamp": clicked_at,
+        "user_agent": user_agent,
+        "ip_hash": hash_ip(ip_address),
+    }
+    try:
+        redis_client.lpush(settings.click_queue_name, json.dumps(event))
+    except redis.RedisError:
+        # Analytics is best effort at the edge; the worker queue can be
+        # temporarily unavailable without turning a redirect into an error.
+        return
+
+
 @app.post("/api/links", response_model=LinkResponse, status_code=status.HTTP_201_CREATED)
 def create_link(
     payload: LinkCreate,
@@ -91,7 +118,12 @@ def create_link(
 
 
 @app.get("/{code}")
-def redirect_to_long_url(code: str, db: Session = Depends(get_db)) -> RedirectResponse:
+def redirect_to_long_url(
+    code: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
     """Resolve a short code and issue a temporary redirect."""
 
     cached_url = None
@@ -101,7 +133,15 @@ def redirect_to_long_url(code: str, db: Session = Depends(get_db)) -> RedirectRe
         except redis.RedisError:
             cached_url = None
         if cached_url:
-            return RedirectResponse(url=cached_url, status_code=status.HTTP_302_FOUND)
+            response = RedirectResponse(url=cached_url, status_code=status.HTTP_302_FOUND)
+            background_tasks.add_task(
+                enqueue_click_event,
+                code,
+                datetime.now(timezone.utc).isoformat(),
+                request.headers.get("user-agent", ""),
+                get_client_ip(request),
+            )
+            return response
 
     link = db.scalar(select(Link).where(Link.code == code))
     if link is None:
@@ -114,4 +154,12 @@ def redirect_to_long_url(code: str, db: Session = Depends(get_db)) -> RedirectRe
             # A cache write is an optimization; the redirect must still work.
             pass
 
-    return RedirectResponse(url=link.long_url, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=link.long_url, status_code=status.HTTP_302_FOUND)
+    background_tasks.add_task(
+        enqueue_click_event,
+        code,
+        datetime.now(timezone.utc).isoformat(),
+        request.headers.get("user-agent", ""),
+        get_client_ip(request),
+    )
+    return response
