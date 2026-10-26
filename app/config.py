@@ -11,6 +11,12 @@ class Settings:
         "postgresql+psycopg://shortener:shortener@localhost:5432/shortener",
     )
     base_url: str = os.getenv("BASE_URL", "http://localhost:8000")
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+    cache_enabled: bool = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
+    rate_limit_window_seconds: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+    trusted_proxy_ips: str = os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1")
 
 
 settings = Settings()

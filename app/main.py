@@ -3,7 +3,8 @@
 import secrets
 import string
 
-from fastapi import Depends, FastAPI, HTTPException, status
+import redis
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +13,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.models import Link
+from app.redis_client import redis_client
+from app.request_ip import get_client_ip
 from app.schemas import LinkCreate, LinkResponse
 from app.validation import validate_long_url
 
@@ -29,10 +32,40 @@ def generate_code() -> str:
     return "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
 
 
+def enforce_rate_limit(request: Request) -> None:
+    """Apply a fixed-window limit, failing open if Redis is unavailable."""
+
+    key = f"rate_limit:{get_client_ip(request)}"
+    try:
+        count = redis_client.incr(key)
+        if count == 1:
+            redis_client.expire(key, settings.rate_limit_window_seconds)
+        if count > settings.rate_limit_per_minute:
+            retry_after = redis_client.ttl(key)
+            if retry_after < 0:
+                retry_after = settings.rate_limit_window_seconds
+            raise HTTPException(
+                status_code=429,
+                detail="Link creation rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+    except HTTPException:
+        raise
+    except redis.RedisError:
+        # Availability of link creation is preferable to strict throttling
+        # during a Redis outage; database uniqueness still protects storage.
+        return
+
+
 @app.post("/api/links", response_model=LinkResponse, status_code=status.HTTP_201_CREATED)
-def create_link(payload: LinkCreate, db: Session = Depends(get_db)) -> LinkResponse:
+def create_link(
+    payload: LinkCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> LinkResponse:
     """Validate a destination and persist a collision-safe short code."""
 
+    enforce_rate_limit(request)
     try:
         long_url = validate_long_url(payload.long_url, settings.base_url)
     except ValueError as exc:
@@ -61,8 +94,24 @@ def create_link(payload: LinkCreate, db: Session = Depends(get_db)) -> LinkRespo
 def redirect_to_long_url(code: str, db: Session = Depends(get_db)) -> RedirectResponse:
     """Resolve a short code and issue a temporary redirect."""
 
+    cached_url = None
+    if settings.cache_enabled:
+        try:
+            cached_url = redis_client.get(f"link:{code}")
+        except redis.RedisError:
+            cached_url = None
+        if cached_url:
+            return RedirectResponse(url=cached_url, status_code=status.HTTP_302_FOUND)
+
     link = db.scalar(select(Link).where(Link.code == code))
     if link is None:
         raise HTTPException(status_code=404, detail="Short link not found")
+
+    if settings.cache_enabled:
+        try:
+            redis_client.setex(f"link:{code}", settings.cache_ttl_seconds, link.long_url)
+        except redis.RedisError:
+            # A cache write is an optimization; the redirect must still work.
+            pass
 
     return RedirectResponse(url=link.long_url, status_code=status.HTTP_302_FOUND)
