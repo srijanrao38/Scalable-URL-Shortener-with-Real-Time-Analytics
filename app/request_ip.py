@@ -1,6 +1,6 @@
 """Client IP extraction with an explicit trusted-proxy boundary."""
 
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 
 from fastapi import Request
 
@@ -12,13 +12,17 @@ def _trusted_proxy_ips() -> set[str]:
 
 
 def _is_trusted_proxy(value: str) -> bool:
-    if value in _trusted_proxy_ips():
-        return True
-    # Configuration can use a literal IP; invalid values simply are not trusted.
     try:
-        return value in {str(ip_address(item)) for item in _trusted_proxy_ips()}
+        direct_ip = ip_address(value)
     except ValueError:
         return False
+    for configured in _trusted_proxy_ips():
+        try:
+            if direct_ip in ip_network(configured, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def get_client_ip(request: Request) -> str:

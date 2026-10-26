@@ -9,20 +9,29 @@ from datetime import datetime, timezone
 import redis
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import Link
+from app.models import Click, Link
 from app.redis_client import redis_client
 from app.request_ip import get_client_ip
-from app.schemas import LinkCreate, LinkResponse
+from app.schemas import LinkCreate, LinkListItem, LinkResponse, StatsResponse
+from app.stats import breakdown, clicks_per_day, find_link, total_clicks
 from app.validation import validate_long_url
 
 
 app = FastAPI(title="URL Shortener API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 CODE_ALPHABET = string.ascii_letters + string.digits
 CODE_LENGTH = 7
@@ -115,6 +124,71 @@ def create_link(
             db.rollback()
 
     raise HTTPException(status_code=503, detail="Could not allocate a unique short code")
+
+
+@app.get("/api/links", response_model=list[LinkListItem])
+def list_links(db: Session = Depends(get_db)) -> list[LinkListItem]:
+    """List links and let PostgreSQL count clicks in the same query."""
+
+    rows = db.execute(
+        select(Link, func.count(Click.id).label("click_count"))
+        .outerjoin(Click, Click.link_id == Link.id)
+        .group_by(Link.id)
+        .order_by(Link.created_at.desc())
+    ).all()
+    return [
+        LinkListItem(
+            code=link.code,
+            long_url=link.long_url,
+            short_url=f"{settings.base_url.rstrip('/')}/{link.code}",
+            created_at=link.created_at.isoformat(),
+            click_count=int(click_count),
+        )
+        for link, click_count in rows
+    ]
+
+
+def _stats_link_or_404(code: str, db: Session) -> Link:
+    link = find_link(db, code)
+    if link is None:
+        raise HTTPException(status_code=404, detail="Short link not found")
+    return link
+
+
+@app.get("/api/links/{code}/stats", response_model=StatsResponse)
+def link_stats(code: str, db: Session = Depends(get_db)) -> StatsResponse:
+    link = _stats_link_or_404(code, db)
+    return StatsResponse(
+        code=link.code,
+        total_clicks=total_clicks(db, link.id),
+        clicks_per_day=clicks_per_day(db, link.id),
+        device_breakdown=breakdown(db, link.id, Click.device),
+        browser_breakdown=breakdown(db, link.id, Click.browser),
+    )
+
+
+@app.get("/api/links/{code}/stats/total")
+def link_total_clicks(code: str, db: Session = Depends(get_db)) -> dict[str, int | str]:
+    link = _stats_link_or_404(code, db)
+    return {"code": code, "total_clicks": total_clicks(db, link.id)}
+
+
+@app.get("/api/links/{code}/stats/daily")
+def link_clicks_per_day(code: str, db: Session = Depends(get_db)) -> list[dict[str, int | str]]:
+    link = _stats_link_or_404(code, db)
+    return clicks_per_day(db, link.id)
+
+
+@app.get("/api/links/{code}/stats/devices")
+def link_device_breakdown(code: str, db: Session = Depends(get_db)) -> list[dict[str, int | str]]:
+    link = _stats_link_or_404(code, db)
+    return breakdown(db, link.id, Click.device)
+
+
+@app.get("/api/links/{code}/stats/browsers")
+def link_browser_breakdown(code: str, db: Session = Depends(get_db)) -> list[dict[str, int | str]]:
+    link = _stats_link_or_404(code, db)
+    return breakdown(db, link.id, Click.browser)
 
 
 @app.get("/{code}")

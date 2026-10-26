@@ -32,6 +32,7 @@ def client():
     original_base_url = settings.base_url
     settings.base_url = "https://short.example"
     with TestClient(app, follow_redirects=False) as test_client:
+        test_client.testing_session_factory = TestingSessionLocal
         yield test_client
     settings.base_url = original_base_url
     app.dependency_overrides.clear()

@@ -20,6 +20,7 @@ class Settings:
     ip_hash_salt: str = os.getenv("IP_HASH_SALT", "change-me-in-production")
     click_queue_name: str = os.getenv("CLICK_QUEUE_NAME", "click_events")
     failed_click_queue_name: str = os.getenv("FAILED_CLICK_QUEUE_NAME", "click_events_failed")
+    cors_origins: str = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost")
 
 
 settings = Settings()
