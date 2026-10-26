@@ -10,8 +10,8 @@ import redis
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -36,6 +36,21 @@ app.add_middleware(
 CODE_ALPHABET = string.ascii_letters + string.digits
 CODE_LENGTH = 7
 MAX_CODE_RETRIES = 10
+
+
+@app.get("/health")
+def health(db: Session = Depends(get_db)) -> dict[str, str]:
+    """Expose dependency health for Compose and deployment checks."""
+
+    try:
+        db.execute(text("SELECT 1"))
+        redis_client.ping()
+    except (SQLAlchemyError, redis.RedisError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Dependency unhealthy: {exc.__class__.__name__}",
+        ) from exc
+    return {"status": "ok", "postgres": "ok", "redis": "ok"}
 
 
 def generate_code() -> str:

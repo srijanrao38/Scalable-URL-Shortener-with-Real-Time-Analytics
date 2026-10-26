@@ -1,0 +1,61 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      APP_DIR: ${{ secrets.EC2_APP_DIR || '/opt/link-shotner' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+      - name: Back up current release on EC2
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" "mkdir -p '$APP_DIR/backups' '$APP_DIR'"
+          ssh "$EC2_USER@$EC2_HOST" "if [ -f '$APP_DIR/docker-compose.yml' ]; then stamp=\$(date +%Y%m%d%H%M%S); mkdir -p '$APP_DIR/backups/\$stamp'; cp -a '$APP_DIR/docker-compose.yml' '$APP_DIR/Dockerfile' '$APP_DIR/requirements.txt' '$APP_DIR/alembic.ini' '$APP_DIR/app' '$APP_DIR/alembic' '$APP_DIR/worker' '$APP_DIR/frontend' '$APP_DIR/nginx' '$APP_DIR/backups/\$stamp/'; fi"
+      - name: Copy application to EC2
+        run: |
+          scp docker-compose.yml Dockerfile requirements.txt alembic.ini "$EC2_USER@$EC2_HOST:$APP_DIR/"
+          scp -r app alembic worker frontend nginx "$EC2_USER@$EC2_HOST:$APP_DIR/"
+      - name: Write runtime environment on EC2
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          IP_HASH_SALT: ${{ secrets.IP_HASH_SALT }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+        run: |
+          {
+            printf 'POSTGRES_DB=shortener\n'
+            printf 'POSTGRES_USER=shortener\n'
+            printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"
+            printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
+            printf 'BASE_URL=%s\n' "$BASE_URL"
+            printf 'REDIS_URL=redis://redis:6379/0\n'
+            printf 'CACHE_TTL_SECONDS=3600\nCACHE_ENABLED=true\n'
+            printf 'RATE_LIMIT_PER_MINUTE=10\nRATE_LIMIT_WINDOW_SECONDS=60\n'
+            printf 'TRUSTED_PROXY_IPS=127.0.0.1,::1,172.16.0.0/12\n'
+            printf 'IP_HASH_SALT=%s\n' "$IP_HASH_SALT"
+            printf 'CLICK_QUEUE_NAME=click_events\nFAILED_CLICK_QUEUE_NAME=click_events_failed\n'
+            printf 'CORS_ORIGINS=%s\n' "$CORS_ORIGINS"
+          } | ssh "$EC2_USER@$EC2_HOST" "umask 077; cat > '$APP_DIR/.env'"
+      - name: Build, migrate, and start Compose stack
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" "cd '$APP_DIR' && docker compose build --pull && docker compose run --rm api alembic upgrade head && docker compose up -d"
+      - name: Verify deployment health
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" "curl --fail --retry 10 --retry-delay 3 http://localhost/health"
