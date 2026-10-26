@@ -1,12 +1,30 @@
-# Scalable URL Shortener with Real-Time Analytics
+# LinkLab — Scalable URL Shortener with Real-Time Analytics
 
-This project is a production-style URL shortener that turns long URLs into
-short links and records click analytics asynchronously. It demonstrates a
-service-oriented architecture with a FastAPI API, PostgreSQL persistence,
-Redis caching and queuing, a Python analytics worker, and a React dashboard.
-The complete stack runs with Docker Compose and includes health checks,
-database migrations, rate limiting, a dead-letter queue, automated tests, and
-a GitHub Actions deployment path to AWS EC2.
+LinkLab addresses two common link-sharing problems: long URLs are difficult to
+share, and redirect analytics should not slow down the redirect itself. It
+provides short, validated links backed by PostgreSQL, serves fast HTTP 302
+redirects through Redis caching, and records click events asynchronously for a
+React analytics dashboard.
+
+This portfolio project demonstrates a service-oriented backend, asynchronous
+processing, data modeling, automated testing, and a containerized local
+development workflow.
+
+## Features
+
+- Create short links from validated public `http://` and `https://` URLs.
+- Return temporary HTTP `302` redirects so destinations can change later.
+- Cache link destinations in Redis with a configurable TTL.
+- Queue click events in Redis without blocking redirect responses.
+- Process queued events with a Python worker that parses device and browser
+  information and persists analytics to PostgreSQL.
+- Display total clicks, daily clicks, device breakdowns, and browser breakdowns
+  in a React dashboard using Recharts.
+- Apply a fixed-window rate limit per client IP.
+- Hash client IPs with a configurable salt instead of storing raw addresses.
+- Reject localhost, private, reserved, and the shortener's own domain as
+  destinations to reduce SSRF and open-redirect risks.
+- Send failed database insert events to a Redis dead-letter queue.
 
 ## Architecture
 
@@ -53,12 +71,26 @@ flowchart LR
 | CI/CD | GitHub Actions and SSH to EC2 |
 | Load testing | k6 |
 
+### Repository layout
+
+```text
+app/                    FastAPI routes, validation, models, and Redis client
+worker/                 Background click-event consumer
+frontend/               React/Vite dashboard
+tests/                  API, Redis, worker, health, and analytics tests
+loadtest/               k6 scenario and load-test instructions
+alembic/                Database migration scripts
+docs/                   Deployment notes
+.github/workflows/      CI and manual deployment workflows
+```
+
 ## How to run
 
 ### Prerequisites
 
 - Docker Desktop with Docker Compose
 - Git
+- k6, only if you want to run the load tests
 
 ### Start the complete application
 
@@ -67,6 +99,12 @@ not already exist:
 
 ```bash
 cp .env.example .env
+```
+
+PowerShell equivalent:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 Review `.env` and change secrets or connection settings as needed. Then build
@@ -105,13 +143,32 @@ Stop the application with:
 docker compose down
 ```
 
-Useful endpoints:
+Quick links:
 
 - `POST /api/links` — create a short link
 - `GET /{code}` — redirect and enqueue a click event
 - `GET /api/links` — list links with click counts
 - `GET /api/links/{code}/stats` — dashboard summary
 - `GET /health` — PostgreSQL and Redis health check
+
+## API
+
+The routes are implemented in `app/main.py`.
+
+| Method and path | Purpose | Success response |
+| --- | --- | --- |
+| `GET /health` | Check PostgreSQL and Redis availability | `200` with dependency status; `503` if unhealthy |
+| `POST /api/links` | Create a short link from `{ "long_url": "https://example.com" }` | `201` with `code`, `long_url`, and `short_url` |
+| `GET /{code}` | Resolve a short code, enqueue analytics, and redirect | `302` to the original URL |
+| `GET /api/links` | List links and click counts | `200` list with `created_at` and `click_count` |
+| `GET /api/links/{code}/stats` | Return the dashboard summary | `200` with totals, daily clicks, devices, and browsers |
+| `GET /api/links/{code}/stats/total` | Return the all-time click total | `200` with `code` and `total_clicks` |
+| `GET /api/links/{code}/stats/daily` | Return daily clicks from the last 30 calendar days | `200` list of dates and click counts |
+| `GET /api/links/{code}/stats/devices` | Return device aggregation | `200` list of names and counts |
+| `GET /api/links/{code}/stats/browsers` | Return browser aggregation | `200` list of names and counts |
+
+Invalid or unsafe destinations return `422`. Link creation returns `429` when
+the per-IP rate limit is exceeded.
 
 ## Tests
 
@@ -123,6 +180,52 @@ python -m pytest -q
 The tests override the database with an isolated SQLite database for speed;
 production and Compose use PostgreSQL 16. Redis behavior is covered with
 deterministic fakes and outage cases.
+
+## Load testing
+
+The k6 scenario in [loadtest/redirect.js](loadtest/redirect.js) models a
+shortener workload with 99% redirects and 1% link creation. Redirects do not
+follow the external destination, so the measured response is the shortener's
+`302`.
+
+Run with caching enabled:
+
+```bash
+docker compose up --build -d
+k6 run -e BASE_URL=http://localhost -e CACHE_ENABLED=true loadtest/redirect.js
+```
+
+Run with caching disabled by recreating the API:
+
+```bash
+CACHE_ENABLED=false docker compose up -d --build api
+k6 run -e BASE_URL=http://localhost -e CACHE_ENABLED=false loadtest/redirect.js
+```
+
+PowerShell equivalent:
+
+```powershell
+$env:CACHE_ENABLED = "false"
+docker compose up -d --build api
+k6 run -e BASE_URL=http://localhost -e CACHE_ENABLED=false loadtest/redirect.js
+$env:CACHE_ENABLED = "true"
+docker compose up -d --build api
+```
+
+The scenario runs for 30 seconds at a 20-request-per-second arrival rate.
+Record requests per second, p95 latency, error rate, cache mode, and exact
+duration for each run. No benchmark results are claimed here because none are
+checked into the repository yet. See [loadtest/README.md](loadtest/README.md)
+for the complete scenario notes and seed-link option.
+
+## Screenshots
+
+No screenshots are currently included in the repository.
+
+> Screenshot placeholder — add a dashboard screenshot here when available.
+
+> Screenshot placeholder — add an API documentation screenshot here when
+> available.
 
 ## Security and abuse protections
 
@@ -137,13 +240,16 @@ deterministic fakes and outage cases.
   redirects; analytics enqueue failures do not break redirects.
 - `.env`, build output, dependencies, and Python caches are ignored by Git.
 
-## CI/CD
+## CI/CD status
 
-Every push and pull request runs Python tests against PostgreSQL/Redis service
-containers and builds the frontend. A push to `main` runs the same checks, then
-SSHes to EC2, writes runtime secrets from GitHub Secrets, backs up the previous
-release, builds Compose images, runs Alembic, starts the stack, and checks
-`/health`. See [docs/DEPLOY.md](docs/DEPLOY.md).
+The GitHub Actions CI workflow runs the backend tests against PostgreSQL and
+Redis service containers and builds the frontend on pushes and pull requests.
+
+The deployment workflow is currently manual-only through
+`workflow_dispatch` while AWS EC2 deployment secrets are being configured.
+AWS deployment is not claimed as complete. See [docs/DEPLOY.md](docs/DEPLOY.md)
+for the planned EC2 workflow and required secrets; never commit those secrets
+or `.env` files.
 
 ## Design decisions and trade-offs
 
@@ -159,7 +265,7 @@ release, builds Compose images, runs Alembic, starts the stack, and checks
 - **Hashed IPs:** analytics can group repeat visitors without retaining raw
   network identifiers. The salt prevents simple precomputed lookups.
 
-## Known limitations
+## Limitations and future improvements
 
 - There is no authentication or per-owner authorization yet; the dashboard is
   intentionally a portfolio-wide view.
@@ -173,13 +279,9 @@ release, builds Compose images, runs Alembic, starts the stack, and checks
   a managed PostgreSQL/Redis setup would be appropriate next steps.
 - Frontend charts are client-rendered and currently use a compact single-page
   hash navigation model.
+- Future work could add authentication, durable queue delivery, richer
+  observability, HTTPS, managed infrastructure, and measured benchmark results.
 
-## Load test results
+## Disclosure
 
-Run the two scenarios in [loadtest/README.md](loadtest/README.md), then fill in
-the observed values:
-
-| Scenario | Requests/sec | p95 latency | Error rate | Duration |
-| --- | ---: | ---: | ---: | ---: |
-| Cache on | _fill in_ | _fill in_ | _fill in_ | 30s |
-| Cache off | _fill in_ | _fill in_ | _fill in_ | 30s |
+Built with AI-assisted development (Codex); architecture decisions, testing and deployment by me.
