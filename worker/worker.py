@@ -20,6 +20,18 @@ from worker.user_agent import parse_user_agent
 logger = logging.getLogger(__name__)
 
 
+# BRPOP may legitimately wait for the full blocking timeout when the queue is
+# empty, so the worker needs a socket timeout longer than that wait.
+BRPOP_TIMEOUT_SECONDS = 5
+WORKER_SOCKET_TIMEOUT_SECONDS = 10
+worker_redis_client = redis.Redis.from_url(
+    settings.redis_url,
+    decode_responses=True,
+    socket_connect_timeout=0.2,
+    socket_timeout=WORKER_SOCKET_TIMEOUT_SECONDS,
+)
+
+
 def _decode_event(raw_event: str | bytes) -> dict[str, Any]:
     if isinstance(raw_event, bytes):
         raw_event = raw_event.decode("utf-8")
@@ -78,7 +90,14 @@ def run_worker() -> None:
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     while True:
-        item = redis_client.brpop(settings.click_queue_name, timeout=5)
+        try:
+            item = worker_redis_client.brpop(
+                settings.click_queue_name,
+                timeout=BRPOP_TIMEOUT_SECONDS,
+            )
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as exc:
+            logger.warning("Redis queue read failed; retrying: %s", exc)
+            continue
         if item is None:
             continue
         _, raw_event = item

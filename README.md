@@ -1,9 +1,12 @@
-# Link Shortener
+# Scalable URL Shortener with Real-Time Analytics
 
-A small portfolio project that turns long URLs into short links and records
-click analytics. It demonstrates a service split, Docker Compose, PostgreSQL,
-Redis caching and queues, a Python worker, a React dashboard, and a GitHub
-Actions deployment path to AWS EC2.
+This project is a production-style URL shortener that turns long URLs into
+short links and records click analytics asynchronously. It demonstrates a
+service-oriented architecture with a FastAPI API, PostgreSQL persistence,
+Redis caching and queuing, a Python analytics worker, and a React dashboard.
+The complete stack runs with Docker Compose and includes health checks,
+database migrations, rate limiting, a dead-letter queue, automated tests, and
+a GitHub Actions deployment path to AWS EC2.
 
 ## Architecture
 
@@ -50,17 +53,57 @@ flowchart LR
 | CI/CD | GitHub Actions and SSH to EC2 |
 | Load testing | k6 |
 
-## Local setup
+## How to run
 
-Copy the example configuration and change values as needed:
+### Prerequisites
+
+- Docker Desktop with Docker Compose
+- Git
+
+### Start the complete application
+
+From the repository root, copy the example environment file if `.env` does
+not already exist:
 
 ```bash
 cp .env.example .env
+```
+
+Review `.env` and change secrets or connection settings as needed. Then build
+and start the full stack:
+
+```bash
 docker compose up --build
 ```
 
-Open <http://localhost>. The API is also exposed on port 8000 for direct
-debugging. Compose runs Alembic before starting the API.
+The stack includes PostgreSQL, Redis, the FastAPI API, the background worker,
+the React frontend, and Nginx. Alembic migrations run automatically before the
+API starts.
+
+Open <http://localhost> for the dashboard. The API is also exposed directly
+on port 8000:
+
+- API docs: <http://localhost:8000/docs>
+- Health check: <http://localhost:8000/health>
+
+To run in the background and follow worker logs:
+
+```bash
+docker compose up -d --build
+docker compose logs -f worker
+```
+
+After changing worker code, rebuild just that service:
+
+```bash
+docker compose up -d --build worker
+```
+
+Stop the application with:
+
+```bash
+docker compose down
+```
 
 Useful endpoints:
 

@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 
 import redis
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -11,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.db import Base
 from app.models import Click, Link
+from worker import worker as worker_module
 from worker.worker import process_event
 
 
@@ -144,3 +146,26 @@ def test_worker_dead_letters_database_failure():
 
     assert process_event(event, FailingDatabase(), queue) is False
     assert queue.lists[main.settings.failed_click_queue_name] == [event]
+
+
+def test_worker_continues_after_redis_timeout(monkeypatch, caplog):
+    class TimeoutThenStopRedis:
+        def __init__(self):
+            self.calls = 0
+
+        def brpop(self, queue_name, timeout):
+            self.calls += 1
+            assert queue_name == worker_module.settings.click_queue_name
+            assert timeout == worker_module.BRPOP_TIMEOUT_SECONDS
+            if self.calls == 1:
+                raise redis.exceptions.TimeoutError("socket read timed out")
+            raise KeyboardInterrupt
+
+    queue = TimeoutThenStopRedis()
+    monkeypatch.setattr(worker_module, "worker_redis_client", queue)
+
+    with caplog.at_level("WARNING"), pytest.raises(KeyboardInterrupt):
+        worker_module.run_worker()
+
+    assert queue.calls == 2
+    assert "Redis queue read failed; retrying" in caplog.text
